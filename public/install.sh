@@ -129,10 +129,52 @@ get_cpu_stat() {
     awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat 2>/dev/null || echo "0 0"
 }
 
+
 get_http_ping() { 
     local rtt
     rtt=$(curl -o /dev/null -s -m 1 --connect-timeout 1 -w "%{time_total}" "http://${1:-}" 2>/dev/null | awk '{printf "%.0f", $1*1000}')
     echo "${rtt:-0}"
+}
+
+get_tcp_ping() {
+    local host="$1"
+    local port="${2:-443}"
+
+    # fallback：秒级时间（保证跨平台）
+    local start_sec end_sec start_ns end_ns
+
+    # 记录开始时间（优先纳秒，否则秒）
+    if start_ns=$(date +%s%N 2>/dev/null); then
+        :
+    else
+        start_sec=$(date +%s)
+    fi
+
+    # 执行 TCP connect
+    if ! timeout 5 bash -c "exec 3<>/dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+        echo -1
+        return
+    fi
+
+    # 记录结束时间
+    if end_ns=$(date +%s%N 2>/dev/null); then
+        :
+    else
+        end_sec=$(date +%s)
+    fi
+
+    # 计算延迟（自动适配）
+    if [[ -n "$start_ns" && -n "$end_ns" ]]; then
+        # 纳秒 -> 毫秒（浮点避免 0ms）
+        awk -v s="$start_ns" -v e="$end_ns" 'BEGIN {
+            printf "%.3f\n", (e - s) / 1000000
+        }'
+    else
+        # 秒级 fallback（避免 0）
+        awk -v s="$start_sec" -v e="$end_sec" 'BEGIN {
+            printf "%.3f\n", (e - s) * 1000
+        }'
+    fi
 }
 
 # 静态测试节点定义
@@ -162,10 +204,10 @@ run_network_worker() {
         # 30秒检测一次网络延迟
         if [ $((now - last_ping)) -ge 30 ] || [ "$last_ping" -eq 0 ]; then
             local rand_idx=$((RANDOM % 3))
-            get_http_ping "${CT_NODES[$rand_idx]}" > /dev/shm/.cf_ping_ct.tmp && mv /dev/shm/.cf_ping_ct.tmp /dev/shm/.cf_ping_ct || true
-            get_http_ping "${CU_NODES[$rand_idx]}" > /dev/shm/.cf_ping_cu.tmp && mv /dev/shm/.cf_ping_cu.tmp /dev/shm/.cf_ping_cu || true
-            get_http_ping "${CM_NODES[$rand_idx]}" > /dev/shm/.cf_ping_cm.tmp && mv /dev/shm/.cf_ping_cm.tmp /dev/shm/.cf_ping_cm || true
-            get_http_ping "lf3-ips.zstaticcdn.com" > /dev/shm/.cf_ping_bd.tmp && mv /dev/shm/.cf_ping_bd.tmp /dev/shm/.cf_ping_bd || true
+            get_tcp_ping "${CT_NODES[$rand_idx]}" > /dev/shm/.cf_ping_ct.tmp && mv /dev/shm/.cf_ping_ct.tmp /dev/shm/.cf_ping_ct || true
+            get_tcp_ping "${CU_NODES[$rand_idx]}" > /dev/shm/.cf_ping_cu.tmp && mv /dev/shm/.cf_ping_cu.tmp /dev/shm/.cf_ping_cu || true
+            get_tcp_ping "${CM_NODES[$rand_idx]}" > /dev/shm/.cf_ping_cm.tmp && mv /dev/shm/.cf_ping_cm.tmp /dev/shm/.cf_ping_cm || true
+            get_tcp_ping "lf3-ips.zstaticcdn.com" > /dev/shm/.cf_ping_bd.tmp && mv /dev/shm/.cf_ping_bd.tmp /dev/shm/.cf_ping_bd || true
             last_ping="$now"
         fi
         sleep 5
