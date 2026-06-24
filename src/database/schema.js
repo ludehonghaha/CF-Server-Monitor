@@ -6,7 +6,7 @@ import {
   setMetricsHistoryCache,
   getCacheDuration
 } from '../utils/cache.js';
-import { clearSiteSettingsCache , debug } from '../utils/settings.js';
+import { saveSiteOptions, debug } from '../utils/settings.js';
 import { addHistoryColumns } from './updateDatabase.js';
 
 let dbInitialized = false;
@@ -277,16 +277,8 @@ export async function monthlyCleanup(db) {
   try {
     debug('[Cleanup] 开始执行表轮换操作...');
     
-    const siteOptionsResult = await db.prepare('SELECT value FROM settings WHERE key = ?').bind('site_options').first();
-    const siteOptions = siteOptionsResult && siteOptionsResult.value && siteOptionsResult.value.length > 0 
-      ? JSON.parse(siteOptionsResult.value) 
-      : {};
-    siteOptions.cleanup_skip_count = '1';
-    await db.prepare(
-      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-    ).bind('site_options', JSON.stringify(siteOptions)).run();
+    await saveSiteOptions(db, { cleanup_skip_count: '1' });
     debug('cleanup_skip_count set to 1');
-    clearSiteSettingsCache();
     
     // 1. 删除旧的 metrics_history_old 表（如果存在）
     await db.prepare(`DROP TABLE IF EXISTS metrics_history_old`).run();

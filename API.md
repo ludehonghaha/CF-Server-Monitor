@@ -214,12 +214,10 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
     "secret": "<API_SECRET>",
     "metrics": {
       "cpu": "12.34",
-      "ram": "45.67",
       "ram_total": "8192",
       "ram_used": "3700",
       "swap_total": "2048",
       "swap_used": "100",
-      "disk": "32",
       "disk_total": "102400",
       "disk_used": "32000",
       "load_avg": "0.10 0.20 0.30",
@@ -258,12 +256,10 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | 字段               | 类型           | 单位  | 必填 | 说明                                          |
 | ---------------- | ------------ | --- | -- | ------------------------------------------- |
 | `cpu`            | string       | %   | 是  | CPU 占用率，保留 2 位小数                            |
-| `ram`            | string       | %   | 是  | 内存占用率                                       |
 | `ram_total`      | string       | MB  | 是  | 内存总容量                                       |
 | `ram_used`       | string       | MB  | 是  | 内存已用                                        |
 | `swap_total`     | string       | MB  | 是  | Swap 总容量                                    |
 | `swap_used`      | string       | MB  | 是  | Swap 已用                                     |
-| `disk`           | string       | %   | 是  | 磁盘使用率                                       |
 | `disk_total`     | string       | MB  | 是  | 磁盘总容量                                       |
 | `disk_used`      | string       | MB  | 是  | 磁盘已用                                        |
 | `load_avg`       | string       | -   | 是  | 三个浮点，空格分隔                                   |
@@ -1156,9 +1152,9 @@ Worker 同时注册了 cron 触发器（`scheduled` handler），可在 `wrangle
 | ------------- | --------------- | -------------------------------------------------------------- |
 | `*/1 * * * *` | 每分钟：检测离线节点      | `checkOfflineNodes`（通知）                                        |
 | `0 * * * *`   | 每小时：根据 UTC 日期分支 | 见下表                                                            |
-| `0 0 1 * *`   | 每月 1 号 0 点：表轮换  | `monthlyCleanup`（重命名 metrics\_history → metrics\_history\_old） |
-| `0 0 8 * *`   | 每月 8 号 0 点：删除旧表 | `dropMetricsHistoryOld`                                        |
-| `0 12 * * *`  | 每天 12 点：服务器到期检测 | `checkExpiringServers`                                         |
+|               | 每月 1 号 0 点：表轮换  | `monthlyCleanup`（重命名 metrics\_history → metrics\_history\_old） |
+|               | 每月 8 号 0 点：删除旧表 | `dropMetricsHistoryOld`                                        |
+|               | 每天 12 点：服务器到期检测 | `checkExpiringServers`                                         |
 
 DEBUG 模式（`env.DEBUG=1`）下额外提供：
 
@@ -1195,9 +1191,9 @@ curl -X POST https://status.example.com/update \
     "id":"9b2c4d3e-1a2b-4c5d-9e8f-7a6b5c4d3e2f",
     "secret":"abc123",
     "metrics":{
-      "cpu":"12.34","ram":"45.67","ram_total":"8192","ram_used":"3700",
+      "cpu":"12.34","ram_total":"8192","ram_used":"3700",
       "swap_total":"2048","swap_used":"100",
-      "disk":"32","disk_total":"102400","disk_used":"32000",
+      "disk_total":"102400","disk_used":"32000",
       "load_avg":"0.10 0.20 0.30","boot_time":"1700000000000",
       "net_rx":"12345678","net_tx":"87654321",
       "net_rx_monthly":"1073741824","net_tx_monthly":"536870912",

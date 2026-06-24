@@ -2,7 +2,7 @@ import { checkAuth, simpleAuthResponse, validateCredentials, generateToken } fro
 import { getLatestMetricsForAllServers } from '../database/schema.js';
 import { getAllServers } from '../utils/cache.js';
 import { clearServersListCache, clearServerDetailCache } from '../utils/cache.js';
-import { clearSiteSettingsCache } from '../utils/settings.js';
+import { clearSiteSettingsCache, saveSiteOptions } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { verifyTurnstileToken, md5Hash } from '../utils/common.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createUnauthorizedResponse, createErrorResponse } from '../utils/errors.js';
@@ -296,12 +296,7 @@ export async function handleAdminAPI(request, env, sys) {
         'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
       ).bind('appearance_options', JSON.stringify(appearanceOptions)).run();
 
-      const existingSiteOptionsResult = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind('site_options').first();
-      const existingSiteOptions = existingSiteOptionsResult && existingSiteOptionsResult.value && existingSiteOptionsResult.value.length > 0 
-        ? JSON.parse(existingSiteOptionsResult.value) 
-        : {};
-
-      const siteOptions = { ...existingSiteOptions };
+      const siteOptions = {};
       for (const field of SITE_FIELDS) {
         if (settings[field] !== undefined) {
           if (field === 'password') {
@@ -313,13 +308,8 @@ export async function handleAdminAPI(request, env, sys) {
           }
         }
       }
-      await env.DB.prepare(
-        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-      ).bind('site_options', JSON.stringify(siteOptions)).run();
-
+      await saveSiteOptions(env.DB, siteOptions);
       Object.assign(sys, appearanceOptions, siteOptions);
-
-      clearSiteSettingsCache();
       return createSuccessResponse({ 
         success: true, 
         message: 'updateSuccess'

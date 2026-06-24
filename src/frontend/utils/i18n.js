@@ -424,7 +424,7 @@ const translations = reactive({
     dbManagement: '数据库管理',
     upgradeDatabase: '升级数据库',
     rebuildDatabase: '重建数据库',
-    upgradeDesc: '更新数据库结构到最新版本',
+    upgradeDesc: '更新数据库结构到最新版本，没有异常则无需操作',
     rebuildDesc: '删除所有表并重新创建（清空所有数据）',
     dangerOperation: '危险操作',
     rebuildWarning: '此操作将删除所有服务器数据和监控历史记录，此操作不可撤销！',

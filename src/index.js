@@ -5,7 +5,7 @@ import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate, handleWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
-import { loadSettings, loadSiteSettings, setDebug, debug } from './utils/settings.js';
+import { loadSettings, loadSiteSettings, setDebug, debug, checkAndUpdateSettings } from './utils/settings.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
 import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from './utils/cache.js';
 import { AppError, createSuccessResponse, createUnauthorizedResponse, createBadRequestResponse, createNotFoundResponse, createErrorResponse } from './utils/errors.js';
@@ -221,6 +221,7 @@ export default {
         }
       }},
       { method: 'GET', path: '/api/config', handler: async () => {
+        await checkAndUpdateSettings(env.DB);
         await ensureFullSettings();
         const turnstileEnabled = sys.turnstile_enabled === 'true';
         let verified = false;
@@ -237,6 +238,7 @@ export default {
         }
 
         return createSuccessResponse({
+          version: sys.version || 'V2.7.4',
           turnstile_enabled: turnstileEnabled,
           turnstile_site_key: sys.turnstile_site_key || '',
           verified: verified,

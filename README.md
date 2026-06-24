@@ -27,7 +27,7 @@ cat /etc/config/cf-probe/config.conf
 <details>
 <summary>更新记录</summary>
 
-- V2.7.3.4 添加允许跨域配置，为后续版本额外功能做铺垫，插入的时候报错提示字段不存在则添加缺失字段
+- V2.7.4 添加允许跨域配置，为后续版本额外功能做铺垫，前端加上跨域配置，修改成HASH模式，修改country为region，数据库自动维护
 - V2.7.3.3 压缩定时任务4个为2个，避免超出免费额度
 - V2.7.3.2 合并通知告警，其他代码逻辑优化
 - V2.7.3.1 当request.cf返回`cf object not available`错误，导致国家/地区代码获取失败，使用request.headers获取作为备选
@@ -408,6 +408,14 @@ Windows 系统
 1. 生成一个至少 32 位的随机字符串作为 JWT Secret
 2. 在管理后台 → 全局设置 → 安全设置中填入 JWT Secret
 3. 保存后系统将使用自定义密钥进行 token 签名
+
+### CORS 跨域配置（可选）
+
+如需允许特定域名跨域访问 Workers API，可配置允许的来源：
+
+1. 在 Workers & Pages 页面的 **Settings** → **Variables and secrets** 中添加 `CORS_ALLOWED_ORIGINS`
+2. 值设置为允许跨域的域名，多个域名用逗号分隔，例如：`https://example.com,https://www.example.com`
+3. 不设置此变量或留空时，默认仅允许同源请求
 
 ### Cloudflare 额度查询（可选）
 
