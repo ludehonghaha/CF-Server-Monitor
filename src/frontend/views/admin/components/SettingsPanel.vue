@@ -25,6 +25,18 @@
 
         <div class="form-row">
           <div class="form-group flex-1">
+            <label class="form-label">{{ trans.displayMode }}</label>
+            <select v-model="settings.display_mode" class="form-select">
+              <option value="bar">{{ trans.displayModeBar }}</option>
+              <option value="ring">{{ trans.displayModeRing }}</option>
+              <option value="table">{{ trans.displayModeTable }}</option>
+            </select>
+            <p class="text-muted text-sm mt-1"><span class="warning-icon">[i]</span> {{ trans.displayModeTip }}</p>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
             <label class="form-label">{{ trans.customHead }}</label>
             <textarea v-model="settings.custom_head" class="form-textarea" rows="3" placeholder="<link rel='stylesheet' href='...'">
             </textarea>
@@ -34,6 +46,14 @@
             <label class="form-label">{{ trans.customScript }}</label>
             <textarea v-model="settings.custom_script" class="form-textarea" rows="4" placeholder="console.log('Hello');">
             </textarea>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.themeOptions }}</label>
+            <textarea v-model="settings.theme_options" class="form-textarea" rows="5" placeholder='{"a":1,"b":2}'></textarea>
+            <p class="text-muted text-sm mt-1">{{ trans.themeOptionsTip }}</p>
           </div>
         </div>
 

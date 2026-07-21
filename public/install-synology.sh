@@ -1,9 +1,9 @@
 #!/bin/bash
 # ==============================================================================
 # V1.3.1
-# CF-Server-Monitor 安装/卸载脚本 (企业级安全加固版)
-# 支持: Ubuntu/Debian/CentOS/RHEL/Fedora/Rocky/AlmaLinux
-# Fixes: 1. 独立协程无 wait 阻塞 2. 原子化原子覆盖 3. 兼容全版本 Systemd 4. 严格 set -u 闭环
+# CF-Server-Monitor 安装/卸载脚本 (Synology 群晖专用版)
+# 支持: Synology DSM 6.x / 7.x (BusyBox 环境适配)
+# 与 install.sh 功能一致，针对群晖系统做了路径、服务管理、命令兼容性适配
 # ==============================================================================
 
 set -euo pipefail
@@ -18,25 +18,26 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# 路径定义
+# 路径定义（群晖适配）
 SERVICE_NAME="cf-probe"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+SYNOLOGY_RC_DIR="/usr/local/etc/rc.d"
+RC_FILE="${SYNOLOGY_RC_DIR}/${SERVICE_NAME}.sh"
 SCRIPT_FILE="/usr/local/bin/${SERVICE_NAME}.sh"
-CONFIG_DIR="/etc/config/cf-probe"
+CONFIG_DIR="/usr/local/etc/cf-probe"
 CONFIG_FILE="${CONFIG_DIR}/config.conf"
 TRAFFIC_DATA_FILE="${CONFIG_DIR}/traffic.dat"
 OLD_TRAFFIC_DATA_FILE="/var/lib/cf-probe/traffic.dat"
 MAX_TRAFFIC_CORRECTION_GB=1000000
-CONTAINER_PID_FILE="/run/cf-probe.pid"
+CONTAINER_PID_FILE="/var/run/cf-probe.pid"
 CONTAINER_LOG_FILE="/var/log/cf-probe.log"
-DEBUG_ENV_FILE="/run/cf-probe-debug.env"
+DEBUG_ENV_FILE="/var/run/cf-probe-debug.env"
 
-# 全局运行模式: systemd | container
-RUNTIME_MODE="systemd"
+# 全局运行模式: synology
+RUNTIME_MODE="synology"
 
 print_banner() {
     echo -e "${CYAN}╔═══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     CF-Server-Monitor (Enterprise)    ║${NC}"
+    echo -e "${CYAN}║  CF-Server-Monitor (Synology Edition) ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════╝${NC}"
 }
 
@@ -87,82 +88,58 @@ normalize_binary_value() {
     esac
 }
 
-detect_runtime_mode() {
-    if [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && [ -d /run/systemd/system ]; then
-        RUNTIME_MODE="systemd"
-        info "Runtime mode: systemd"
-    else
-        RUNTIME_MODE="container"
-        warn "Runtime mode: container"
-    fi
-}
-
 check_root() {
     if [ "$(id -u)" != "0" ]; then
         error "请使用 root 权限运行此脚本: sudo bash $0"
     fi
 }
 
-detect_os() {
-    # 彻底杜绝 set -u 下 source /etc/os-release 由于发行版自身未知变量未定义导致的崩溃
-    if [ -f /etc/os-release ]; then
-        OS_ID=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
-    else
-        OS_ID=$(uname -s | tr '[:upper:]' '[:lower:]')
+check_synology() {
+    step "检测 Synology DSM 环境..."
+    if [ ! -f /etc/synoinfo.conf ]; then
+        warn "未检测到 Synology DSM 环境 (/etc/synoinfo.conf 不存在)，继续安装但可能出现兼容性问题"
     fi
-    OS_ID=${OS_ID:-"unknown"}
-    
-    case "$OS_ID" in
-        ubuntu|debian|raspbian) PKG_MGR="apt-get" ;;
-        centos|rhel|fedora|rocky|almalinux|ol|amzn|opencloudos|anolis|alinux) PKG_MGR="yum" ;;
-        alpine) error "未识别的系统类型: alpine，请在后台选择正确的系统后复制命令重试" ;;
-        *)
-            warn "未识别的系统类型: $OS_ID，尝试自动检测包管理器..."
-            if command -v apt-get >/dev/null 2>&1; then
-                PKG_MGR="apt-get"
-            elif command -v yum >/dev/null 2>&1; then
-                PKG_MGR="yum"
-            elif command -v dnf >/dev/null 2>&1; then
-                PKG_MGR="yum"
-            elif command -v apk >/dev/null 2>&1; then
-                PKG_MGR="apk"
-            elif command -v opkg >/dev/null 2>&1; then
-                PKG_MGR="opkg"
-            else
-                error "未找到可用的包管理器 (apt-get/yum/dnf/apk/opkg)，请手动安装依赖。"
-            fi
-            ;;
-    esac
+    RUNTIME_MODE="synology"
+    info "Runtime mode: synology"
+}
+
+detect_os() {
+    # 群晖 BusyBox 环境，包管理器有限
+    if command -v synopkg >/dev/null 2>&1; then
+        PKG_MGR="synopkg"
+    elif command -v opkg >/dev/null 2>&1; then
+        PKG_MGR="opkg"
+    elif command -v ipkg >/dev/null 2>&1; then
+        PKG_MGR="ipkg"
+    elif command -v apt-get >/dev/null 2>&1; then
+        PKG_MGR="apt-get"
+    elif command -v yum >/dev/null 2>&1; then
+        PKG_MGR="yum"
+    else
+        PKG_MGR="none"
+        warn "未找到可用的包管理器，依赖需手动确认"
+    fi
+    info "Package manager: ${PKG_MGR}"
 }
 
 install_deps() {
     step "检查系统依赖组件..."
-    local required_cmds="curl awk grep sed ps df ping nc"
+    # 群晖 BusyBox 已内置大部分基础命令，重点检查 curl
+    local required_cmds="curl awk grep sed ps df ping"
 
     for cmd in ${required_cmds}; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
             warn "缺少必要依赖: ${cmd}，正在尝试自动安装..."
             local pkg="${cmd}"
             if [ "${cmd}" = "ping" ]; then
-                if [ "${PKG_MGR:-apt-get}" = "apt-get" ]; then
-                    pkg="iputils-ping"
-                else
-                    pkg="iputils"
-                fi
+                pkg="busybox"
             fi
-            if [ "${cmd}" = "nc" ]; then
-                case "${PKG_MGR:-apt-get}" in
-                    apt-get) pkg="netcat-openbsd" ;;
-                    yum)     pkg="nmap-ncat" ;;
-                    *)       pkg="nc" ;;
-                esac
-            fi
-            case "${PKG_MGR:-apt-get}" in
+            case "${PKG_MGR}" in
                 apt-get) apt-get update -qq && apt-get install -y -qq "${pkg}" >/dev/null 2>&1 || true ;;
                 yum)     yum install -y -q "${pkg}" >/dev/null 2>&1 || true ;;
-                apk)     apk add --no-cache --quiet "${pkg}" >/dev/null 2>&1 || true ;;
                 opkg)    opkg install "${pkg}" >/dev/null 2>&1 || true ;;
-                *)       warn "未知的包管理器: ${PKG_MGR:-apt-get}，无法自动安装 ${pkg}" ;;
+                ipkg)    ipkg install "${pkg}" >/dev/null 2>&1 || true ;;
+                *)       warn "无法自动安装 ${pkg}，请手动安装" ;;
             esac
         fi
         if ! command -v "${cmd}" >/dev/null 2>&1; then
@@ -170,20 +147,21 @@ install_deps() {
         fi
     done
 
-    info "基础依赖组件检查通过"
+    # 群晖环境下 nc 可能不存在，作为可选依赖
+    if ! command -v nc >/dev/null 2>&1; then
+        warn "nc (netcat) 不可用，探针将使用 ICMP ping 模式"
+    fi
 
+    info "基础依赖组件检查通过"
 }
 
 stop_old_service() {
     step "清理可能存在的旧服务进程..."
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
-            systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
-        fi
-        if systemctl is-enabled --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
-            systemctl disable "${SERVICE_NAME}.service" 2>/dev/null || true
-        fi
+    # 尝试停止 RC 脚本
+    if [ -f "${RC_FILE}" ]; then
+        "${RC_FILE}" stop 2>/dev/null || true
     fi
+    # 清理 PID 文件
     if [ -f "${CONTAINER_PID_FILE}" ]; then
         local old_pid
         old_pid=$(cat "${CONTAINER_PID_FILE}" 2>/dev/null || echo "")
@@ -206,7 +184,7 @@ set +eu
 
 AGENT_VERSION="__AGENT_VERSION__"
 SERVICE_NAME="cf-probe"
-CONFIG_DIR="/etc/config/cf-probe"
+CONFIG_DIR="/usr/local/etc/cf-probe"
 CONFIG_FILE="${CONFIG_DIR}/config.conf"
 TRAFFIC_DATA_FILE="${CONFIG_DIR}/traffic.dat"
 MAX_TRAFFIC_CORRECTION_GB=1000000
@@ -278,7 +256,6 @@ log_warn_debug() {
     [ "$DEBUG_MODE" = "1" ] && echo "[WARN] $(log_ts) $*"
 }
 
-# 动态检测 stdout 指向的日志文件（systemd 模式走 journald 不写文件，此处为空）
 PROBE_LOG_FILE=""
 if [ -L /proc/self/fd/1 ]; then
     _log_target=$(readlink /proc/self/fd/1 2>/dev/null || echo "")
@@ -322,7 +299,7 @@ get_install_url() {
     case "$origin" in
         http://|https://) return 1 ;;
     esac
-    printf '%s/install.sh' "$origin"
+    printf '%s/install-synology.sh' "$origin"
 }
 
 schedule_agent_update() {
@@ -331,7 +308,7 @@ schedule_agent_update() {
         return 0
     fi
 
-    local now last lock_file install_url systemd_output systemd_status
+    local now last lock_file install_url
     lock_file="${CONFIG_DIR}/auto_update.lock"
 
     now=$(date +%s)
@@ -350,23 +327,6 @@ schedule_agent_update() {
         return 1
     fi
     log_debug "Auto update requested: install_url=${install_url}"
-
-    if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
-        systemd_output=$(systemd-run --unit="${SERVICE_NAME}-auto-update-${now}" /bin/bash -c 'set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" 2>&1)
-        systemd_status=$?
-        if [ "$systemd_status" -eq 0 ]; then
-            printf '%s\n' "$now" > "$lock_file" 2>/dev/null || true
-            log_info "Auto update scheduled via systemd-run: unit=${SERVICE_NAME}-auto-update-${now}"
-            log_debug "systemd-run output: ${systemd_output}"
-            return 0
-        fi
-        log_warn_debug "Auto update systemd-run failed: status=${systemd_status} output=${systemd_output}"
-    fi
-
-    if [ -d /run/systemd/system ]; then
-        log_warn_debug "Auto update scheduling failed: systemd-run unavailable"
-        return 1
-    fi
 
     log_debug "Auto update scheduling via nohup: install_url=${install_url}"
     nohup /bin/bash -c 'set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" >/dev/null 2>&1 &
@@ -605,7 +565,6 @@ EOF
     mv "${TRAFFIC_DATA_FILE}.tmp" "${TRAFFIC_DATA_FILE}" 2>/dev/null || true
 }
 
-# 严苛环境下的规范 JSON 字段转义函数
 escape_json() {
     local val="${1:-}"
     val="${val//\\/\\\\}"
@@ -632,8 +591,10 @@ safe_div() {
     if [ "${den}" -eq 0 ]; then echo "${def}"; else echo $(( num / den )); fi
 }
 
+# 群晖 BusyBox 兼容的网络字节获取
+# BusyBox 的 awk 可能不支持某些正则，简化匹配
 get_net_bytes() {
-    awk 'NR>2 && $1~/^(eth|en|wl)[a-z0-9]*:/{rx+=$2;tx+=$10}END{printf "%.0f %.0f\n",rx,tx}' /proc/net/dev 2>/dev/null || echo "0 0";
+    awk 'NR>2 && ($1~/^(eth|en|wl|bond|docker|veth|ovs_)/){rx+=$2;tx+=$10}END{printf "%.0f %.0f\n",rx+0,tx+0}' /proc/net/dev 2>/dev/null || echo "0 0"
 }
 
 is_leap_year() {
@@ -641,19 +602,67 @@ is_leap_year() {
     [ $((year % 4)) -eq 0 ] && [ $((year % 100)) -ne 0 ] || [ $((year % 400)) -eq 0 ]
 }
 
-# 获取当月账单周期起始时间戳（UTC+0）
+# 纯算术计算：给定年月日（UTC）返回 epoch 秒数，不依赖 date -d
+_days_in_month() {
+    local y=$1 m=$2
+    case "$m" in
+        1|3|5|7|8|10|12) echo 31 ;;
+        4|6|9|11)        echo 30 ;;
+        2) is_leap_year "$y" && echo 29 || echo 28 ;;
+    esac
+}
+
+_epoch_from_ymd() {
+    local y=$1 m=$2 d=$3
+    local days=0 i=1970
+    while [ "$i" -lt "$y" ]; do
+        if is_leap_year "$i"; then days=$((days + 366)); else days=$((days + 365)); fi
+        i=$((i + 1))
+    done
+    i=1
+    while [ "$i" -lt "$m" ]; do
+        days=$((days + $(_days_in_month "$y" "$i")))
+        i=$((i + 1))
+    done
+    days=$((days + d - 1))
+    echo $((days * 86400))
+}
+
+# BusyBox date 兼容：将 epoch 秒数转换为 UTC 年月日
+_get_utc_ymd() {
+    local now_ts="$1"
+    awk -v ts="$now_ts" '
+    BEGIN {
+        secs = ts; y = 1970
+        while (1) {
+            leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+            days_year = leap ? 366 : 365
+            if (secs < days_year * 86400) break
+            secs -= days_year * 86400; y++
+        }
+        mdays[1]=31; mdays[2]=leap?29:28; mdays[3]=31; mdays[4]=30
+        mdays[5]=31; mdays[6]=30; mdays[7]=31; mdays[8]=31
+        mdays[9]=30; mdays[10]=31; mdays[11]=30; mdays[12]=31
+        m = 1
+        while (m <= 12) {
+            if (secs < mdays[m] * 86400) break
+            secs -= mdays[m] * 86400; m++
+        }
+        d = int(secs / 86400) + 1
+        printf "%d %d %d\n", y, m, d
+    }'
+}
+
 get_period_start_ts() {
     local reset_day="$1"
     [ "$reset_day" -eq 0 ] 2>/dev/null && { echo "0"; return; }
     local now_ts="$2"
     local year month day
-    year=$(date -u -d "@${now_ts}" '+%Y' 2>/dev/null || date -u -r "${now_ts}" '+%Y' 2>/dev/null)
-    month=$(date -u -d "@${now_ts}" '+%m' 2>/dev/null || date -u -r "${now_ts}" '+%m' 2>/dev/null)
-    day=$(date -u -d "@${now_ts}" '+%d' 2>/dev/null || date -u -r "${now_ts}" '+%d' 2>/dev/null)
-    
+    read -r year month day < <(_get_utc_ymd "$now_ts")
+
     local target_day="$reset_day"
     case "$month" in
-        02) 
+        02)
             if is_leap_year "$year"; then
                 [ "$target_day" -gt 29 ] && target_day=29
             else
@@ -662,16 +671,15 @@ get_period_start_ts() {
             ;;
         04|06|09|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
     esac
-    
+
     local period_start_ts
     if [ "$day" -ge "$target_day" ]; then
-        period_start_ts=$(date -u -d "${year}-${month}-${target_day} 00:00:00" '+%s' 2>/dev/null || date -u -r "${now_ts}" '+%s' 2>/dev/null)
+        period_start_ts=$(_epoch_from_ymd "$year" "$month" "$target_day")
     else
         local prev_month=$((month - 1))
         [ "$prev_month" -eq 0 ] && { prev_month=12; year=$((year - 1)); }
-        local prev_month_str=$(printf "%02d" "$prev_month")
         case "$prev_month" in
-            02) 
+            02)
                 if is_leap_year "$year"; then
                     [ "$target_day" -gt 29 ] && target_day=29
                 else
@@ -680,22 +688,20 @@ get_period_start_ts() {
                 ;;
             04|06|09|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
         esac
-        period_start_ts=$(date -u -d "${year}-${prev_month_str}-${target_day} 00:00:00" '+%s' 2>/dev/null || date -u -r "${now_ts}" '+%s' 2>/dev/null)
+        period_start_ts=$(_epoch_from_ymd "$year" "$prev_month" "$target_day")
     fi
     echo "$period_start_ts"
 }
 
-# 计算月度流量（自动持久化）
 calc_monthly_traffic() {
     local current_rx="$1"
     local current_tx="$2"
     local reset_day="${RESET_DAY:-1}"
     local now_ts
     now_ts=$(date '+%s')
-    
+
     mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
-    
-    # 读取上次保存的数据（使用临时变量避免与全局变量冲突）
+
     local saved_rx_prev=0 saved_tx_prev=0 saved_rx_period=0 saved_tx_period=0 saved_last_check=0 saved_period_start=0
     if [ -f "${TRAFFIC_DATA_FILE}" ]; then
         local tmp_rx_prev tmp_tx_prev tmp_rx_period tmp_tx_period tmp_last_check tmp_period_start
@@ -713,23 +719,19 @@ calc_monthly_traffic() {
         saved_rx_period=${tmp_rx_period:-0}; saved_tx_period=${tmp_tx_period:-0}
         saved_last_check=${tmp_last_check:-0}; saved_period_start=${tmp_period_start:-0}
     fi
-    
-    # 计算当前账单周期起始
+
     local period_start_ts
     period_start_ts=$(get_period_start_ts "$reset_day" "$now_ts")
-    
-    # 检测是否是首次运行（没有历史记录）
+
     local rx_delta=0 tx_delta=0
     if [ "$saved_last_check" -ne 0 ]; then
-        # 非首次运行，计算增量
         if [ "$current_rx" -lt "$saved_rx_prev" ] || [ "$current_tx" -lt "$saved_tx_prev" ]; then
             rx_delta=0; tx_delta=0
         else
             rx_delta=$((current_rx - saved_rx_prev))
             tx_delta=$((current_tx - saved_tx_prev))
         fi
-        
-        # 判断是否进入新账单周期（跨月）
+
         if [ "$period_start_ts" -ne 0 ] && [ "$period_start_ts" -ne "$saved_period_start" ] && [ "$saved_period_start" -ne 0 ]; then
             saved_rx_period="$rx_delta"; saved_tx_period="$tx_delta"
         else
@@ -737,12 +739,10 @@ calc_monthly_traffic() {
             saved_tx_period=$((saved_tx_period + tx_delta))
         fi
     else
-        # 首次运行，周期流量从0开始
         saved_rx_period=0
         saved_tx_period=0
     fi
-    
-    # 持久化保存
+
     cat > "${TRAFFIC_DATA_FILE}.tmp" << EOF
 RX_PREV=${current_rx}
 TX_PREV=${current_tx}
@@ -752,13 +752,12 @@ LAST_CHECK=${now_ts}
 PERIOD_START=${period_start_ts}
 EOF
     mv "${TRAFFIC_DATA_FILE}.tmp" "${TRAFFIC_DATA_FILE}" 2>/dev/null || true
-    
-    # 返回当月流量（上行=tx, 下行=rx）
+
     echo "$saved_rx_period $saved_tx_period"
 }
 
 get_cpu_stat() {
-    awk '/^cpu /{total=$2+$3+$4+$5+$6+$7+$8+$9;idle=$5+$6;printf "%.0f %.0f\n",total,idle}' /proc/stat 2>/dev/null || echo "0 0";
+    awk '/^cpu /{total=$2+$3+$4+$5+$6+$7+$8+$9;idle=$5+$6;printf "%.0f %.0f\n",total,idle}' /proc/stat 2>/dev/null || echo "0 0"
 }
 
 json_string_or_null() {
@@ -801,7 +800,9 @@ get_gpu_metrics() {
     fi
 }
 
+# BusyBox date 不支持 %N / %3N，纯 awk 实现毫秒级时间戳
 get_time_ms() {
+    # 先尝试系统 date（非 BusyBox 环境可能支持）
     local ts
     ts=$(date +%s%3N 2>/dev/null || true)
     case "${ts}" in
@@ -810,15 +811,11 @@ get_time_ms() {
         ??????????????*) echo "${ts:0:13}"; return 0 ;;
     esac
 
-    ts=$(date +%s%N 2>/dev/null || true)
-    case "${ts}" in
-        ''|*[!0-9]*) ;;
-        ???????????????????) echo "${ts:0:13}"; return 0 ;;
-    esac
+    # BusyBox 回退：用 awk 读 /proc/uptime 算毫秒（精度 ~10ms，足够 TCP ping 用）
+    awk '{ms=int($1*1000); printf "%d\n", ms}' /proc/uptime 2>/dev/null && return 0
 
-    if command -v perl >/dev/null 2>&1; then
-        perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000' 2>/dev/null && return 0
-    fi
+    # 最终回退：只用秒级（精度降级但不会失败）
+    date +%s 2>/dev/null && return 0
     return 1
 }
 
@@ -867,7 +864,6 @@ split_probe_target() {
     return 0
 }
 
-# 统一4探针：同时计算延迟(avg RTT)和丢包率(%)，输出格式 "RTT LOSS"
 get_probe() {
     local target="${1:-}"
     local count="${2:-4}"
@@ -917,7 +913,6 @@ get_probe() {
     echo "$avg_rtt $loss"
 }
 
-# 测试节点定义（支持参数覆盖，空值则跳过）
 CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
@@ -940,7 +935,6 @@ write_probe_result() {
     fi
 }
 
-# Centos限制，所以改成串行执行
 refresh_probe_async() {
     [ -n "$CT_NODE" ] && write_probe_result /dev/shm/.cf_probe_ct get_probe "$CT_NODE" 4 443
     [ -n "$CU_NODE" ] && write_probe_result /dev/shm/.cf_probe_cu get_probe "$CU_NODE" 4 443
@@ -948,11 +942,7 @@ refresh_probe_async() {
     [ -n "$BD_NODE" ] && write_probe_result /dev/shm/.cf_probe_bd get_probe "$BD_NODE" 4 443
 }
 
-# ==============================================================================
-# 高并发/无竞态后台网络 Worker 协程
-# ==============================================================================
 run_network_worker() {
-    # 继承外层 set -eu 行为
     set -eu
     local last_ip=0
     local last_probe=0
@@ -960,18 +950,16 @@ run_network_worker() {
     case "$probe_interval" in ''|*[!0-9]*) probe_interval=60 ;; esac
     [ "$probe_interval" -lt 30 ] && probe_interval=30
     [ "$probe_interval" -gt 60 ] && probe_interval=60
-    
+
     while true; do
         local now; now=$(date +%s)
-        
-        # 10分钟检测一次 IP
+
         if [ $((now - last_ip)) -ge 600 ] || [ "$last_ip" -eq 0 ]; then
             (curl -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > /dev/shm/.cf_ipv4.tmp && mv /dev/shm/.cf_ipv4.tmp /dev/shm/.cf_ipv4 || true
             (if ip -6 route show default >/dev/null 2>&1; then curl -6 -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0"; else echo "0"; fi) > /dev/shm/.cf_ipv6.tmp && mv /dev/shm/.cf_ipv6.tmp /dev/shm/.cf_ipv6 || true
             last_ip="$now"
         fi
-        
-        # 统一探测：跟随上报间隔并限制在 30-60 秒，一次探测同时计算延迟和丢包率
+
         if [ $((now - last_probe)) -ge "$probe_interval" ] || [ "$last_probe" -eq 0 ]; then
             refresh_probe_async
             last_probe="$now"
@@ -980,7 +968,6 @@ run_network_worker() {
     done
 }
 
-# 首次基础数据初始化
 NET_STAT=$(get_net_bytes)
 RX_PREV=$(echo "$NET_STAT" | awk '{print $1}'); RX_PREV=${RX_PREV:-0}
 TX_PREV=$(echo "$NET_STAT" | awk '{print $2}'); TX_PREV=${TX_PREV:-0}
@@ -996,11 +983,10 @@ if [ -z "${SERVER_ID:-}" ] || [ -z "${SECRET:-}" ] || [ -z "${WORKER_URL:-}" ]; 
     exit 1
 fi
 
-log_info "CF-Server-Monitor Probe Engine Started Successfully."
+log_info "CF-Server-Monitor Probe Engine (Synology) Started Successfully."
 log_debug "Config: id=${SERVER_ID} url=${WORKER_URL} report_interval=${REPORT_INTERVAL}s collect_interval=${COLLECT_INTERVAL}s active_interval=${ACTIVE_INTERVAL}s reset_day=${RESET_DAY} auto_update=${AUTO_UPDATE} secret_len=${#SECRET}"
 log_debug "Nodes: ct=${CT_NODE:-} cu=${CU_NODE:-} cm=${CM_NODE:-} bd=${BD_NODE:-}"
 
-# 核心架构升级：在这里脱离主循环，静默启动常驻网络 Worker 协程，无 wait 干扰
 run_network_worker &
 WORKER_PID=$!
 SAMPLES_JSON=""
@@ -1011,14 +997,13 @@ while true; do
     LOOP_START_TIME=$(date +%s)
     rotate_log_if_needed "$PROBE_LOG_FILE"
 
-    # Worker 进程健康检查与自动重启
     if ! kill -0 "$WORKER_PID" 2>/dev/null; then
         log_warn_debug "Network worker exited; restarting"
         run_network_worker &
         WORKER_PID=$!
     fi
-    
-    # ------------------ 同步系统指标采集模块 (全面 set -u 安全适配) ------------------
+
+    # 群晖内存采集 - BusyBox 兼容
     MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0); MEM_TOTAL_KB=${MEM_TOTAL_KB:-0}
     MEM_AVAIL_KB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0); MEM_AVAIL_KB=${MEM_AVAIL_KB:-0}
     if [ "${MEM_AVAIL_KB}" -eq 0 ]; then
@@ -1037,18 +1022,17 @@ while true; do
     SWAP_USED=$(((SWAP_TOTAL_KB - SWAP_FREE_KB) / 1024))
     [ "${SWAP_USED}" -lt 0 ] && SWAP_USED=0
 
-    # 统计所有数据分区的总容量和使用量（排除引导、光驱、Snap等）
+    # 群晖磁盘采集 - 包含 DSM 存储池
     DISK_TOTAL=0; DISK_USED=0
     DISK_STATS=$(df -kP 2>/dev/null | awk '
         NR>1 &&
-        $6 !~ /^(\/boot|\/boot\/efi|\/snap|\/var\/snap)/ &&
-        $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs|none)$/ &&
-        $6 !~ /^(\/proc|\/sys|\/dev|\/run)$/ &&
-        $2 ~ /^[0-9]/ &&
-        $2 + 0 > 0 {
+        $1 !~ /^\/dev\/loop/ &&
+        $6 !~ /^(\/boot|\/boot\/efi|\/snap|\/var\/snap|\/@dev|\/@tmp|\/@shared)/ &&
+        $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs|none)/ &&
+        $1 ~ /^\/dev\// {
             total+=$2; used+=$3
-        } 
-        END {print total, used}
+        }
+        END {print total+0, used+0}
     ')
 
     if [ -n "${DISK_STATS}" ]; then
@@ -1056,13 +1040,12 @@ while true; do
         DISK_USED=$(echo "${DISK_STATS}" | awk '{print int($2/1024)}')
     fi
 
-    # CPU 核心利用率计算
     CPU_STAT=$(get_cpu_stat)
     CPU_TOTAL_NOW=$(echo "$CPU_STAT" | awk '{print $1}'); CPU_TOTAL_NOW=${CPU_TOTAL_NOW:-0}
     CPU_IDLE_NOW=$(echo "$CPU_STAT" | awk '{print $2}'); CPU_IDLE_NOW=${CPU_IDLE_NOW:-0}
     DIFF_TOTAL=$((CPU_TOTAL_NOW - PREV_CPU_TOTAL))
     DIFF_IDLE=$((CPU_IDLE_NOW - PREV_CPU_IDLE))
-    
+
     if [ "${DIFF_TOTAL}" -le 0 ]; then
         CPU="0.00"
     else
@@ -1071,13 +1054,24 @@ while true; do
     PREV_CPU_TOTAL=${CPU_TOTAL_NOW}
     PREV_CPU_IDLE=${CPU_IDLE_NOW}
 
-    # 基础静态/准静态元数据安全解析
-    if [ -f /etc/os-release ]; then
+    # 群晖 OS 信息获取
+    if [ -f /etc/synoinfo.conf ]; then
+        SYNO_DSM_VER=$(grep 'productversion' /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2 || echo "")
+        SYNO_MODEL=$(grep 'upnpmodelname' /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2 || echo "")
+        if [ -n "${SYNO_MODEL}" ] && [ -n "${SYNO_DSM_VER}" ]; then
+            OS="Synology ${SYNO_MODEL} DSM ${SYNO_DSM_VER}"
+        elif [ -n "${SYNO_MODEL}" ]; then
+            OS="Synology ${SYNO_MODEL}"
+        else
+            OS="Synology NAS"
+        fi
+    elif [ -f /etc/os-release ]; then
         OS_RAW=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
+        OS=${OS_RAW:-"Linux"}
     else
-        OS_RAW=$(uname -srm)
+        OS=$(uname -srm)
     fi
-    OS=${OS_RAW:-"Linux"}
+
     ARCH=$(uname -m)
     BOOT_TIME=$(awk '$1=="btime"{print $2}' /proc/stat 2>/dev/null)
     if [ -n "${BOOT_TIME:-}" ]; then
@@ -1085,74 +1079,72 @@ while true; do
     else
         uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
         now_sec=$(date +%s)
-
         if [ "$uptime_sec" -gt 0 ] 2>/dev/null; then
             BOOT_TIME=$(( (now_sec - uptime_sec) * 1000 ))
         else
             BOOT_TIME=0
         fi
     fi
-    CPU_INFO=$(grep -m 1 'model name' /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | xargs || echo "")
+
+    # CPU 型号获取 - 群晖兼容
+    CPU_INFO=""
+    if [ -f /proc/cpuinfo ]; then
+        CPU_INFO=$(grep -m 1 'model name' /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | xargs || echo "")
+    fi
     [ -z "${CPU_INFO}" ] && CPU_INFO=${ARCH}
+
+    # 核心数 - BusyBox 兼容
     CPU_CORES=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1")
+
     GPU_METRICS=$(get_gpu_metrics)
     GPU=$(echo "$GPU_METRICS" | awk 'NR==1{print $1}'); GPU=${GPU:-null}
     GPU_INFO_VALUE=$(echo "$GPU_METRICS" | awk 'NR==2{print}')
     [ -z "${GPU_INFO_VALUE}" ] && GPU_INFO_VALUE="null"
+
     LOAD_AVG=$(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null); LOAD_AVG=${LOAD_AVG:-"0 0 0"}
     PROCESSES=$(ps -e 2>/dev/null | wc -l || echo 0)
 
-    # ---------------- TCP ----------------
+    # TCP - BusyBox 兼容
     TCP_CONN=""
-
     if command -v ss >/dev/null 2>&1; then
-        # 只统计真正“活跃连接”
         TCP_CONN=$(ss -H -ant state established 2>/dev/null | wc -l)
     else
-        # /proc fallback：只算 ESTABLISHED (st=01)
         TCP_CONN=$(awk 'NR>1 && $4=="01"{c++} END{print c+0}' /proc/net/tcp 2>/dev/null)
     fi
-
     TCP_CONN=$(printf "%s" "${TCP_CONN:-0}" | tr -d '\r\n ')
 
-
-    # ---------------- UDP ----------------
+    # UDP - BusyBox 兼容
     UDP_CONN=""
-
     if command -v ss >/dev/null 2>&1; then
         UDP_CONN=$(ss -H -anu 2>/dev/null | wc -l)
     else
         UDP_CONN=$(awk 'NR>1{c++} END{print c+0}' /proc/net/udp 2>/dev/null)
     fi
-
     UDP_CONN=$(printf "%s" "${UDP_CONN:-0}" | tr -d '\r\n ')
 
-    # ------------------ 精确无干扰时钟网速算法 ------------------
     NET_STAT=$(get_net_bytes)
     RX_NOW=$(echo "$NET_STAT" | awk '{print $1}'); RX_NOW=${RX_NOW:-0}
     TX_NOW=$(echo "$NET_STAT" | awk '{print $2}'); TX_NOW=${TX_NOW:-0}
-    
-    # 计算当月累计流量
+
     MONTHLY_TRAFFIC=$(calc_monthly_traffic "$RX_NOW" "$TX_NOW")
     RX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $1}')
     TX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $2}')
-    
+
     TIME_DELTA=$((LOOP_START_TIME - PREV_LOOP_TIME))
     [ "${TIME_DELTA}" -le 0 ] && TIME_DELTA=${ACTIVE_INTERVAL}
-    
+
     RX_DELTA=$((RX_NOW - RX_PREV))
     TX_DELTA=$((TX_NOW - TX_PREV))
     [ "${RX_DELTA}" -lt 0 ] && RX_DELTA=0
     [ "${TX_DELTA}" -lt 0 ] && TX_DELTA=0
-    
+
     RX_SPEED=$(safe_div "${RX_DELTA}" "${TIME_DELTA}" "0")
     TX_SPEED=$(safe_div "${TX_DELTA}" "${TIME_DELTA}" "0")
-    
+
     RX_PREV=${RX_NOW}
     TX_PREV=${TX_NOW}
     PREV_LOOP_TIME=${LOOP_START_TIME}
 
-    # ------------------ 读取共享内存 (Rename 机制下绝对无竞态) ------------------
     [ -f /dev/shm/.cf_ipv4 ] && IPV4=$(cat /dev/shm/.cf_ipv4) || IPV4="0"
     [ -f /dev/shm/.cf_ipv6 ] && IPV6=$(cat /dev/shm/.cf_ipv6) || IPV6="0"
     if [ -f /dev/shm/.cf_probe_ct ]; then _p=$(cat /dev/shm/.cf_probe_ct); PING_CT=${_p%% *}; LOSS_CT=${_p##* }; else PING_CT=""; LOSS_CT=""; fi
@@ -1160,7 +1152,6 @@ while true; do
     if [ -f /dev/shm/.cf_probe_cm ]; then _p=$(cat /dev/shm/.cf_probe_cm); PING_CM=${_p%% *}; LOSS_CM=${_p##* }; else PING_CM=""; LOSS_CM=""; fi
     if [ -f /dev/shm/.cf_probe_bd ]; then _p=$(cat /dev/shm/.cf_probe_bd); PING_BD=${_p%% *}; LOSS_BD=${_p##* }; else PING_BD=""; LOSS_BD=""; fi
 
-    # 安全地构建闭合规范的 JSON 数据流
     EOS=$(escape_json "${OS}")
     EARCH=$(escape_json "${ARCH}")
     ECPU=$(escape_json "${CPU_INFO}")
@@ -1177,7 +1168,7 @@ while true; do
 {"cpu":"$CPU","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","gpu":$GPU,"gpu_info":$GPU_INFO_VALUE,"processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":$PING_CT_JSON,"ping_cu":$PING_CU_JSON,"ping_cm":$PING_CM_JSON,"ping_bd":$PING_BD_JSON,"loss_ct":$LOSS_CT_JSON,"loss_cu":$LOSS_CU_JSON,"loss_cm":$LOSS_CM_JSON,"loss_bd":$LOSS_BD_JSON}
 EOF
 )
-    # 上报上游数据端 (限定 4s 超时控制，主循环绝不严重漂移)
+
     if [ "$COLLECT_INTERVAL" -gt 0 ]; then
         SAMPLE_TS=$((LOOP_START_TIME * 1000))
         SAMPLE_JSON="{\"ts\":$SAMPLE_TS,\"metrics\":$METRICS_JSON}"
@@ -1233,7 +1224,7 @@ EOF
         SAMPLE_COUNT=0
         LAST_REPORT_TIME=$LOOP_START_TIME
     fi
-    
+
     sleep "${ACTIVE_INTERVAL}"
 done
 PROBE_EOF
@@ -1243,47 +1234,91 @@ PROBE_EOF
 }
 
 create_service() {
-    [ "$RUNTIME_MODE" != "systemd" ] && return
+    step "构建 Synology RC 启动脚本..."
 
-    step "构建高兼容、全版本通用的 Systemd 守护配置..."
-    
-    cat > "${SERVICE_FILE}" << EOF
-[Unit]
-Description=CF Server Monitor Probe Agent
-After=network.target network-online.target
-Wants=network-online.target
+    mkdir -p "${SYNOLOGY_RC_DIR}" 2>/dev/null || true
 
-[Service]
-Type=simple
-Environment=CF_PROBE_DEBUG=0
-EnvironmentFile=-${DEBUG_ENV_FILE}
-ExecStart=/bin/bash "${SCRIPT_FILE}" -debug=\${CF_PROBE_DEBUG}
-Restart=always
-RestartSec=5
-User=root
-Group=root
+    cat > "${RC_FILE}" << EOF
+#!/bin/sh
+# CF-Server-Monitor Synology RC Script
+# chkconfig: 2345 99 01
+# description: CF Server Monitor Probe Agent
 
-# 生产级通用平滑优先级约束：永远不挤占前台核心业务
-Nice=19
-CPUSchedulingPolicy=other
-IOSchedulingClass=idle
-IOSchedulingPriority=7
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=cf-probe
+NAME="${SERVICE_NAME}"
+SCRIPT="${SCRIPT_FILE}"
+PID_FILE="${CONTAINER_PID_FILE}"
+LOG_FILE="${CONTAINER_LOG_FILE}"
+DEBUG_ENV="${DEBUG_ENV_FILE}"
 
-[Install]
-WantedBy=multi-user.target
+start() {
+    if [ -f "\${PID_FILE}" ] && kill -0 \$(cat "\${PID_FILE}") 2>/dev/null; then
+        echo "\${NAME} is already running (PID: \$(cat \${PID_FILE}))"
+        return 0
+    fi
+    echo "Starting \${NAME}..."
+    mkdir -p /var/log 2>/dev/null || true
+    local debug_val=0
+    if [ -f "\${DEBUG_ENV}" ]; then
+        debug_val=\$(grep 'CF_PROBE_DEBUG=' "\${DEBUG_ENV}" 2>/dev/null | cut -d= -f2 || echo 0)
+    fi
+    nohup /bin/bash "\${SCRIPT}" -debug="\${debug_val}" >> "\${LOG_FILE}" 2>&1 &
+    local pid=\$!
+    echo "\${pid}" > "\${PID_FILE}"
+    sleep 1.5
+    if kill -0 "\${pid}" 2>/dev/null; then
+        echo "\${NAME} started (PID: \${pid})"
+    else
+        echo "\${NAME} failed to start"
+        return 1
+    fi
+}
+
+stop() {
+    if [ -f "\${PID_FILE}" ]; then
+        local pid
+        pid=\$(cat "\${PID_FILE}" 2>/dev/null || echo "")
+        if [ -n "\${pid}" ] && kill -0 "\${pid}" 2>/dev/null; then
+            echo "Stopping \${NAME} (PID: \${pid})..."
+            kill "\${pid}" 2>/dev/null || true
+            sleep 2
+            kill -0 "\${pid}" 2>/dev/null && kill -9 "\${pid}" 2>/dev/null || true
+        fi
+        rm -f "\${PID_FILE}"
+    fi
+    pkill -9 -f "\${SCRIPT}" 2>/dev/null || true
+    echo "\${NAME} stopped"
+}
+
+status() {
+    if [ -f "\${PID_FILE}" ] && kill -0 \$(cat "\${PID_FILE}") 2>/dev/null; then
+        echo "\${NAME} is running (PID: \$(cat \${PID_FILE}))"
+    else
+        echo "\${NAME} is not running"
+    fi
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+case "\$1" in
+    start)   start ;;
+    stop)    stop ;;
+    status)  status ;;
+    restart) restart ;;
+    *)       echo "Usage: \$0 {start|stop|status|restart}" ;;
+esac
 EOF
 
-    info "Systemd 守护配置文件生成成功: ${SERVICE_FILE}"
+    chmod +x "${RC_FILE}"
+    info "Synology RC 启动脚本生成成功: ${RC_FILE}"
 }
 
 apply_debug_runtime_env() {
-    [ "$RUNTIME_MODE" != "systemd" ] && return
-
     if [ "${DEBUG_MODE:-0}" = "1" ]; then
-        if mkdir -p /run 2>/dev/null && printf 'CF_PROBE_DEBUG=1\n' > "${DEBUG_ENV_FILE}" 2>/dev/null; then
+        if mkdir -p /var/run 2>/dev/null && printf 'CF_PROBE_DEBUG=1\n' > "${DEBUG_ENV_FILE}" 2>/dev/null; then
             chmod 600 "${DEBUG_ENV_FILE}" 2>/dev/null || true
         else
             warn "调试日志运行参数写入失败，将按默认值 0 启动"
@@ -1294,38 +1329,30 @@ apply_debug_runtime_env() {
 }
 
 start_service() {
-    if [ "$RUNTIME_MODE" = "systemd" ]; then
-        step "加载进程树并激活监控探针..."
-        systemctl daemon-reload
-        systemctl enable ${SERVICE_NAME}.service >/dev/null 2>&1 || true
-        systemctl restart ${SERVICE_NAME}.service
+    step "以 Synology 模式启动监控探针..."
 
-        sleep 1.5
-        if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-            info "探针监控引擎已进入平稳运行状态。"
-        else
-            error "探针服务未能启动成功。请执行命令排查原因: journalctl -u ${SERVICE_NAME} -n 20"
-        fi
+    if [ -f "${CONTAINER_PID_FILE}" ] && kill -0 "$(cat "${CONTAINER_PID_FILE}")" 2>/dev/null; then
+        info "探针已在运行中 (PID: $(cat "${CONTAINER_PID_FILE}"))"
+        return
+    fi
+
+    mkdir -p /var/log 2>/dev/null || true
+    mkdir -p /dev/shm 2>/dev/null || true
+
+    local debug_val=0
+    if [ -f "${DEBUG_ENV_FILE}" ]; then
+        debug_val=$(grep 'CF_PROBE_DEBUG=' "${DEBUG_ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo 0)
+    fi
+
+    nohup bash "${SCRIPT_FILE}" -debug="${debug_val}" >> "${CONTAINER_LOG_FILE}" 2>&1 &
+    local pid=$!
+    echo "$pid" > "${CONTAINER_PID_FILE}"
+
+    sleep 1.5
+    if kill -0 "$pid" 2>/dev/null; then
+        info "探针监控引擎已启动 (PID: $pid)"
     else
-        step "以容器模式启动监控探针..."
-
-        if [ -f "${CONTAINER_PID_FILE}" ] && kill -0 "$(cat "${CONTAINER_PID_FILE}")" 2>/dev/null; then
-            info "探针已在运行中 (PID: $(cat "${CONTAINER_PID_FILE}"))"
-            return
-        fi
-
-        mkdir -p /var/log 2>/dev/null || true
-
-        nohup bash "${SCRIPT_FILE}" -debug="${DEBUG_MODE}" >> "${CONTAINER_LOG_FILE}" 2>&1 &
-        local pid=$!
-        echo "$pid" > "${CONTAINER_PID_FILE}"
-
-        sleep 1.5
-        if kill -0 "$pid" 2>/dev/null; then
-            info "探针监控引擎已启动 (PID: $pid)"
-        else
-            error "探针启动失败，请查看日志: ${CONTAINER_LOG_FILE}"
-        fi
+        error "探针启动失败，请查看日志: ${CONTAINER_LOG_FILE}"
     fi
 }
 
@@ -1367,14 +1394,14 @@ install_probe() {
 
     print_banner
     check_root
+    check_synology
     detect_os
-    detect_runtime_mode
     install_deps
     stop_old_service
 
     if [ -f "${CONFIG_FILE}" ]; then
         step "检测到已有配置文件，执行二次安装..."
-        
+
         if [ -n "${SERVER_ID}" ] && [ -n "${SECRET}" ] && [ -n "${WORKER_URL}" ]; then
             COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
             REPORT_INTERVAL=${REPORT_INTERVAL:-60}
@@ -1470,17 +1497,17 @@ EOF
     if [ -n "${RX_CORRECTION}" ] || [ -n "${TX_CORRECTION}" ]; then
         step "应用流量校正..."
         rm -f "${OLD_TRAFFIC_DATA_FILE}" 2>/dev/null || true
-        
+
         mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
         local now_ts=$(date '+%s')
         local rx_correction_bytes=0 tx_correction_bytes=0
-        local current_rx=$(awk 'NR>2 && $1~/^(eth|en|wl)[a-z0-9]*:/{rx+=$2}END{printf "%.0f", rx}' /proc/net/dev 2>/dev/null || echo 0)
-        local current_tx=$(awk 'NR>2 && $1~/^(eth|en|wl)[a-z0-9]*:/{tx+=$10}END{printf "%.0f", tx}' /proc/net/dev 2>/dev/null || echo 0)
+        local current_rx=$(awk 'NR>2 && ($1~/^(eth|en|wl|bond|docker|veth|ovs_)/){rx+=$2}END{printf "%.0f", rx+0}' /proc/net/dev 2>/dev/null || echo 0)
+        local current_tx=$(awk 'NR>2 && ($1~/^(eth|en|wl|bond|docker|veth|ovs_)/){tx+=$10}END{printf "%.0f", tx+0}' /proc/net/dev 2>/dev/null || echo 0)
         [ -n "${RX_CORRECTION}" ] && rx_correction_bytes=$(echo "${RX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
         [ -n "${TX_CORRECTION}" ] && tx_correction_bytes=$(echo "${TX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
         [ -n "${RX_CORRECTION}" ] && info "下行流量校正: ${RX_CORRECTION}GB"
         [ -n "${TX_CORRECTION}" ] && info "上行流量校正: ${TX_CORRECTION}GB"
-        
+
         cat > "${TRAFFIC_DATA_FILE}" << EOF
 RX_PREV=${current_rx}
 TX_PREV=${current_tx}
@@ -1497,7 +1524,7 @@ EOF
     start_service
 
     echo -e "\n${GREEN}======================================================="
-    echo -e "         CF-Server-Monitor ${AGENT_VERSION} 安装成功"
+    echo -e "    CF-Server-Monitor ${AGENT_VERSION} (Synology) 安装成功"
     echo -e "=======================================================${NC}"
     echo -e "  服务状态 : ${GREEN}Active (Running)${NC}"
     echo -e "  配置参数 :"
@@ -1519,16 +1546,11 @@ EOF
     [ -n "${CU_NODE}" ] && echo -e "    ● CU节点      : ${CU_NODE}"
     [ -n "${CM_NODE}" ] && echo -e "    ● CM节点      : ${CM_NODE}"
     [ -n "${BD_NODE}" ] && echo -e "    ● BD节点      : ${BD_NODE}"
-    if [ "$RUNTIME_MODE" = "systemd" ]; then
-        echo -e "  管理指令 :"
-        echo -e "    ● 查看实时日志 : journalctl -u ${SERVICE_NAME} -f"
-        echo -e "    ● 查看运行状态 : systemctl status ${SERVICE_NAME}"
-        echo -e "    ● 停止探针服务 : systemctl stop ${SERVICE_NAME}"
-    else
-        echo -e "  管理指令 :"
-        echo -e "    ● 查看实时日志 : tail -f ${CONTAINER_LOG_FILE}"
-        echo -e "    ● 停止探针服务 : kill \$(cat ${CONTAINER_PID_FILE})"
-    fi
+    echo -e "  管理指令 :"
+    echo -e "    ● 查看实时日志 : tail -f ${CONTAINER_LOG_FILE}"
+    echo -e "    ● 查看运行状态 : ${RC_FILE} status"
+    echo -e "    ● 停止探针服务 : ${RC_FILE} stop"
+    echo -e "    ● 重启探针服务 : ${RC_FILE} restart"
     echo -e "=============================================\n"
 }
 
@@ -1537,24 +1559,13 @@ uninstall_probe() {
     echo -e "${YELLOW}[!] 开始执行无残留深度卸载清理方案...${NC}\n"
     check_root
 
-    detect_runtime_mode
-
-    step "停用并撤销系统守护进程..."
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
-            systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
-        fi
-        if systemctl is-enabled --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
-            systemctl disable "${SERVICE_NAME}.service" 2>/dev/null || true
-        fi
+    step "停用并清理 RC 启动脚本..."
+    if [ -f "${RC_FILE}" ]; then
+        "${RC_FILE}" stop 2>/dev/null || true
     fi
 
-    step "清理服务描述性系统文件..."
-    rm -f "${SERVICE_FILE}"
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
-    fi
+    step "清理服务文件..."
+    rm -f "${RC_FILE}"
 
     step "销毁探针物理可执行代码文件..."
     rm -f "${SCRIPT_FILE}"
@@ -1566,7 +1577,7 @@ uninstall_probe() {
     rm -rf /var/lib/${SERVICE_NAME}
     rm -rf "${CONFIG_DIR}"
 
-    step "清理容器模式运行痕迹..."
+    step "清理运行痕迹..."
     if [ -f "${CONTAINER_PID_FILE}" ]; then
         local old_pid
         old_pid=$(cat "${CONTAINER_PID_FILE}" 2>/dev/null || echo "")
@@ -1576,6 +1587,7 @@ uninstall_probe() {
         rm -f "${CONTAINER_PID_FILE}"
     fi
     rm -f "${CONTAINER_LOG_FILE}"
+    rm -f "${DEBUG_ENV_FILE}"
 
     step "根除孤儿或僵尸状态的探测残留进程..."
     if pgrep -f "${SERVICE_NAME}.sh" >/dev/null 2>&1; then
